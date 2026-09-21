@@ -157,8 +157,8 @@ class Multicore
   end
 
   # MessagePack -> value tree. Reads float32 as well as float64; str and bin
-  # both come back as a String, map keys as they are on the wire (a Symbol
-  # arrives as a String).
+  # both come back as a String, map keys as they are on the wire. Types turns
+  # Strings into Symbols afterwards where the kernel's signature says Symbol.
   class Decoder
     def initialize(mc, bytes)
       @mc = mc
@@ -301,6 +301,180 @@ class Multicore
     end
   end
 
+  # Reads the RETURN type of an RBS method type ("(Array[Symbol]) -> Hash[Symbol, Float]")
+  # and keeps only where a Symbol sits in it, as a tree:
+  #   [:sym]  [:array, t]  [:hash, key_t, value_t]  [:tuple, [t, ...]]
+  # A slot without a Symbol is nil; a return type with no Symbol at all is nil.
+  # Optionals are their inner type (nil stays nil). Anything it cannot read gives nil,
+  # so the value is left as the wire delivered it.
+  class TypeParser
+    def initialize(sig)
+      @s = sig
+      @i = 0
+      @bad = false
+    end
+
+    def bad?
+      @bad
+    end
+
+    def skip_space
+      while @i < @s.length && @s[@i] == " "
+        @i += 1
+      end
+    end
+
+    # The index just after the first "->" outside every bracket, or nil.
+    def after_arrow
+      depth = 0
+      i = 0
+      while i < @s.length
+        c = @s[i]
+        if c == "(" || c == "[" || c == "{"
+          depth += 1
+        elsif c == ")" || c == "]" || c == "}"
+          depth -= 1
+        elsif c == "-" && depth == 0 && @s[i + 1] == ">"
+          return i + 2
+        end
+        i += 1
+      end
+      nil
+    end
+
+    def parse_return
+      start = after_arrow
+      return nil if start.nil?
+      @i = start
+      t = type
+      skip_space
+      @bad = true if @i < @s.length
+      t
+    end
+
+    def ident
+      start = @i
+      while @i < @s.length
+        b = @s.getbyte(@i)
+        if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 95 || b == 58
+          @i += 1
+        else
+          break
+        end
+      end
+      @s.byteslice(start, @i - start)
+    end
+
+    # Types up to the closing bracket; the opening one is already consumed.
+    def list(close)
+      items = []
+      while true
+        items << type
+        skip_space
+        c = @s[@i]
+        if c == ","
+          @i += 1
+        elsif c == close
+          @i += 1
+          break
+        else
+          @bad = true
+          break
+        end
+        break if @bad
+      end
+      items
+    end
+
+    def any?(items)
+      i = 0
+      while i < items.length
+        return true unless items[i].nil?
+        i += 1
+      end
+      false
+    end
+
+    def type
+      skip_space
+      if @s[@i] == "["
+        @i += 1
+        items = list("]")
+        return any?(items) ? [:tuple, items] : nil
+      end
+      name = ident
+      if name.empty?
+        @bad = true
+        return nil
+      end
+      name = name.byteslice(2, name.bytesize - 2) if name.byteslice(0, 2) == "::"
+      args = nil
+      skip_space
+      if @s[@i] == "["
+        @i += 1
+        args = list("]")
+      end
+      skip_space
+      @i += 1 if @s[@i] == "?"
+      if name == "Symbol"
+        [:sym]
+      elsif name == "Array" && args && args.length == 1
+        args[0].nil? ? nil : [:array, args[0]]
+      elsif name == "Hash" && args && args.length == 2
+        any?(args) ? [:hash, args[0], args[1]] : nil
+      else
+        nil
+      end
+    end
+  end
+
+  # Strings to Symbols, in the positions a TypeParser tree marks.
+  class Types
+    def self.for_signature(sig)
+      return nil if sig.nil?
+      p = Multicore::TypeParser.new(sig)
+      t = p.parse_return
+      p.bad? ? nil : t
+    end
+
+    def self.convert(v, node)
+      return v if node.nil?
+      kind = node[0]
+      if kind == :sym
+        return v.is_a?(String) ? v.to_sym : v
+      elsif kind == :array
+        return v unless v.is_a?(Array)
+        out = []
+        i = 0
+        while i < v.length
+          out << convert(v[i], node[1])
+          i += 1
+        end
+        return out
+      elsif kind == :tuple
+        return v unless v.is_a?(Array)
+        out = []
+        i = 0
+        while i < v.length
+          out << convert(v[i], node[1][i])
+          i += 1
+        end
+        return out
+      elsif kind == :hash
+        return v unless v.is_a?(Hash)
+        out = {}
+        ks = v.keys
+        i = 0
+        while i < ks.length
+          out[convert(ks[i], node[1])] = convert(v[ks[i]], node[2])
+          i += 1
+        end
+        return out
+      end
+      v
+    end
+  end
+
   # One call of a kernel. Its slot on the worker is held until the result is
   # collected, so call done? or value on every job you spawn.
   class Job
@@ -370,7 +544,7 @@ class Multicore
       if status >= 0
         begin
           d = Multicore::Decoder.new(@mc, data)
-          @value = d.read
+          @value = Multicore::Types.convert(d.read, Multicore::Types.for_signature(@mc._signature(@name)))
           unless d.finished?
             @error = Multicore::Error.new("the reply of #{@name} has bytes left over")
           end

@@ -30,6 +30,17 @@ class Multicore
     def discard: () -> nil
   end
 
+  class TypeParser
+    def initialize: (String sig) -> void
+    def parse_return: () -> Array[untyped]?
+    def bad?: () -> bool
+  end
+
+  class Types
+    def self.for_signature: (String? sig) -> Array[untyped]?
+    def self.convert: (untyped v, Array[untyped]? node) -> untyped
+  end
+
   class Encoder
     def initialize: (Multicore mc) -> void
     def bytes: () -> String
