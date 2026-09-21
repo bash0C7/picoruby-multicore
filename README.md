@@ -127,6 +127,7 @@ reaches Ruby.
 | Exception | Raised when |
 |---|---|
 | `Multicore::CoreBusy` | the second core is in use by something else |
+| `Multicore::NoMemory` | `malloc` could not supply the job slots (or core 1's stack on rp2040) when the worker started; nothing is left allocated |
 | `Multicore::UnknownKernel` | the name is not in the table (the message lists the registered names) |
 | `Multicore::QueueFull` | every job slot is taken |
 | `Multicore::InputTooLarge` | the encoded arguments do not fit the input buffer |
@@ -151,18 +152,26 @@ Set them with `-D` where `ports/<board>/multicore.c` is compiled.
 |---|---|---|
 | `MULTICORE_IN_CAP` | 4096 | input buffer, bytes per job |
 | `MULTICORE_OUT_CAP` | 4096 | output buffer, bytes per job |
-| `MULTICORE_QUEUE_DEPTH` | 8 | job slots |
-| `MULTICORE_STACK_BYTES` | 8192 | stack of the worker task / core 1 |
+| `MULTICORE_QUEUE_DEPTH` | 4 | job slots |
+| `MULTICORE_STACK_BYTES` | 8192 | stack of the worker task / core 1 (rp2040: malloc'ed too) |
 
-RAM used is `MULTICORE_QUEUE_DEPTH * (MULTICORE_IN_CAP + MULTICORE_OUT_CAP)`
-bytes. `Multicore.in_cap`, `Multicore.out_cap` and `Multicore.queue_depth`
+Nothing is reserved statically. The worker's start (the first `run` / `spawn` / `open`)
+`malloc`s the job slots on the VM's core, and `close` frees them once the worker has really
+stopped. A slot costs `MULTICORE_IN_CAP + MULTICORE_OUT_CAP + 28` bytes (8220 on the defaults), so the
+heap holds `MULTICORE_QUEUE_DEPTH` times that while the worker runs (32,880 bytes on the defaults). On
+rp2040 core 1's stack, `MULTICORE_STACK_BYTES` (8192, plus up to 8 bytes of alignment), is
+`malloc`ed and freed the same way. The worker itself never allocates. When `close` cannot stop a
+worker inside a long kernel within the bounded wait it raises `Multicore::Timeout` and everything
+stays allocated until a later `close` (or the next start) finds the worker gone.
+
+`Multicore.in_cap`, `Multicore.out_cap` and `Multicore.queue_depth`
 return the values a build was made with.
 
 ## Ports
 
 | Port | Worker | Notes |
 |---|---|---|
-| `host` | a pthread | compiled into libmruby; runs the fake kernels; `MULTICORE_HOST_CORE_BUSY=1` in the environment makes the start report `CoreBusy` |
+| `host` | a pthread | compiled into libmruby; runs the fake kernels; `MULTICORE_HOST_CORE_BUSY=1` in the environment makes the start report `CoreBusy`; `MULTICORE_HOST_FAIL_ALLOC=1` makes every allocation fail (`NoMemory`) |
 | `esp32` | a FreeRTOS task pinned to core 1 | woken with a task notification |
 | `rp2040` | pico-sdk core 1 | RAM resident loop and dispatch (`__not_in_flash_func`); shared-RAM state flags and `__dmb()`; `__sev()` / `__wfe()` as the doorbell |
 
@@ -219,7 +228,10 @@ The Ruby layer stays inside the mruby/c subset.
 ## Development
 
 The host tests run through the PicoRuby harness (picotest) on both VMs, with
-the pthread port and the fake kernels. Board behavior is verified on hardware.
+the pthread port and the fake kernels. `test/c/run.sh` builds `test/c/engine_test.c` against the host port
+and runs it under ThreadSanitizer and AddressSanitizer: start / close cycles, the allocation failure
+path and close while a kernel runs, with the host port counting live allocations. Board behavior is
+verified on hardware.
 
 ## License
 
