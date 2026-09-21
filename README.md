@@ -59,9 +59,13 @@ table (`multicore_kernels`, see `include/multicore.h`). A build such as
 sendairk03 generates the table from `kernels/*.rb`, where each top-level `def`
 carries its types as inline RBS. This gem only calls what is in the table.
 
-Built alone (the host tests) the table is a hand-written set of fake kernels in
-`test/support/fake_kernels.c`. A firmware build with no kernels links against an
-empty table and every call raises `Multicore::UnknownKernel`.
+**A build must provide `multicore_kernels`.** The gem has no default table. sendairk03 always emits
+one (empty when there are no kernels), in which case every call raises
+`Multicore::UnknownKernel`. A firmware link without it fails with
+`undefined reference to `multicore_kernels'` (GNU ld) or
+`Undefined symbols ... "_multicore_kernels"` (Apple ld), referenced from
+`mc_find_kernel` and `MULTICORE_signature` in `ports/<board>/multicore.c`. Built alone (the host tests)
+the table is a hand-written set of fake kernels in `test/support/fake_kernels.c`.
 
 ### run, spawn, value
 
@@ -90,16 +94,22 @@ argument whose only key is `:timeout_ms` therefore cannot be the last argument.
 | Integer | int (shortest signed form) | Integer |
 | Float | float64 (always) | Float; a float32 reply is read too |
 | String | str (raw bytes, UTF-8 or not, NUL allowed) | String |
-| Symbol | str | **String** (the wire has no Symbol) |
+| Symbol | str | Symbol where the kernel's return type says Symbol (see below), else String |
 | Array | array | Array |
-| Hash | map, in insertion order | Hash (keys as they are on the wire: Strings) |
+| Hash | map, in insertion order | Hash |
+
+The wire has no Symbol, so a Symbol travels as a str. On the way back the Ruby layer reads the
+**return type** of the called kernel's `signature()` (for example
+`(Array[Symbol]) -> Hash[Symbol, Float]`) and turns Strings into Symbols exactly where the type says
+`Symbol`: `Symbol`, `Array[Symbol]`, `Hash[Symbol, V]`, `Hash[K, Symbol]`, tuples, optionals, and nested
+combinations of these. Every other String stays a String, and a signature it cannot read (or `untyped`)
+leaves the result as the wire delivered it. Arguments need nothing: a Symbol argument already encodes as a str.
 
 Anything else (a Range, your own class) raises `Multicore::TypeError` before
 the worker is touched.
 
-Floats keep every bit, including `-0.0`, infinities, subnormals and NaN. On
-mruby the VM itself stamps a serial number into the payload of each NaN it
-creates, so a NaN keeps its NaN-ness but not its payload.
+Floats keep every bit, including `-0.0`, infinities and subnormals. NaN keeps its NaN-ness but not its
+payload: on mruby the VM itself stamps a serial number into the payload of each NaN it creates.
 
 ### Integer width
 
@@ -123,8 +133,15 @@ reaches Ruby.
 | `Multicore::OutputTooLarge` | the result does not fit the output buffer |
 | `Multicore::TypeError` | an argument is not the type in the kernel's signature, or a value cannot be sent |
 | `Multicore::RangeError` | an Integer does not fit the kernel's Integer width |
-| `Multicore::KernelError` | the kernel raised; the message carries its exception class and message |
+| `Multicore::KernelError` | the kernel raised; the message carries the kernel's name and the message its `error_message` returns ("the kernel raised" when the entry has none) |
 | `Multicore::Timeout` | no result within `timeout_ms` (the core stopped, the heap ran out and the kernel exited, ...), or `close` while a kernel is still running |
+
+### Limits
+
+- `Multicore.run` reads `timeout_ms` from a trailing `{ timeout_ms: n }` Hash (mruby/c cannot tell a Hash
+  argument from keywords when a method also takes `*args`). A Hash argument whose only key is
+  `:timeout_ms` is therefore read as the option and cannot be the last argument.
+- A NaN result keeps its NaN-ness but not its payload bits (see Types).
 
 ## Build-time constants
 
@@ -179,21 +196,16 @@ MessagePack value. It returns the bytes written, or `-1` (arguments do not fit
 the signature), `-2` (output buffer too small), `-3` (the kernel raised) or `-4`
 (Integer out of range). `init` runs once before that kernel's first call.
 
-`src/kernel_table.c` supplies a weak empty table and a weak
-`multicore_kernel_error_message(const multicore_kernel_t *)` that returns NULL.
-A build that can name a library's error message overrides the second so a
-`Multicore::KernelError` carries it. The strong table has to be linked in: when
-it lives in a static archive that also holds the weak default, make sure the
-strong definition is the one that gets pulled.
+`error_message` returns the message of the exception a call that answered `-3` raised. The worker calls
+it after such a call and hands the text to Ruby as the `Multicore::KernelError` message.
 
 ## Layout
 
 ```
-mrblib/multicore.rb            Multicore, Job, the MessagePack Encoder / Decoder, the exceptions
+mrblib/multicore.rb            Multicore, Job, the MessagePack Encoder / Decoder, the signature walker, the exceptions
 include/multicore.h            C contract (build constants, kernel table, submit / poll / result)
 include/multicore_engine.h     job slots and the worker step, shared by every port
 src/multicore.c                per-VM dispatch (src/mruby/, src/mrubyc/) and the Float <-> bytes helpers
-src/kernel_table.c             weak empty kernel table
 ports/host/                    pthread worker
 ports/esp32/                   FreeRTOS task on core 1
 ports/rp2040/                  pico-sdk core 1
