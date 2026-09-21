@@ -1,16 +1,77 @@
 class Multicore
   class Error < StandardError
   end
+  class CoreBusy < Error
+  end
+  class UnknownKernel < Error
+  end
+  class QueueFull < Error
+  end
+  class InputTooLarge < Error
+  end
+  class OutputTooLarge < Error
+  end
+  class TypeError < Error
+  end
+  class RangeError < Error
+  end
+  class KernelError < Error
+  end
+  class Timeout < Error
+  end
 
-  JOB_MAX: Integer
+  DEFAULT_TIMEOUT_MS: Integer
 
-  def initialize: (unit: Symbol | String) -> void
-  def send: (Integer value) -> nil
-  def take: () -> Integer?
+  class Job
+    def initialize: (Multicore mc, Integer id, String name) -> void
+    def done?: () -> bool
+    def wait: (?timeout_ms: Integer?) -> self
+    def value: (?timeout_ms: Integer?) -> untyped
+    def discard: () -> nil
+  end
+
+  class Encoder
+    def initialize: (Multicore mc) -> void
+    def bytes: () -> String
+    def encode: (untyped obj) -> untyped
+  end
+
+  class Decoder
+    def initialize: (Multicore mc, String bytes) -> void
+    def finished?: () -> bool
+    def read: () -> untyped
+  end
+
+  def self.core: () -> Multicore
+  def self.run: (Symbol | String name, *untyped args) -> untyped
+  def self.spawn: (Symbol | String name, *untyped args) -> Job
+  def self.open: () { (Multicore mc) -> untyped } -> untyped
+  def self.close: () -> nil
+  def self.running?: () -> bool
+  def self.in_cap: () -> Integer
+  def self.out_cap: () -> Integer
+  def self.queue_depth: () -> Integer
+
+  # run takes a trailing { timeout_ms: Integer? } Hash (10_000 when absent, nil waits without limit)
+  def run: (Symbol | String name, *untyped args) -> untyped
+  def spawn: (Symbol | String name, *untyped args) -> Job
   def close: () -> nil
 
-  private def _open: (String unit) -> Integer
-  private def _send: (Integer value) -> bool
-  private def _take: () -> Integer?
-  private def _close: () -> bool
+  def _ensure_started: () -> nil
+  def _error_for: (Integer status, String name, String data) -> Error
+
+  # glue (src/mruby, src/mrubyc)
+  def _start: () -> Integer
+  def _stop: () -> bool
+  def _running: () -> bool
+  def _submit: (String name, String bytes) -> Integer
+  def _poll: (Integer job) -> Integer
+  def _result: (Integer job) -> [Integer, String]?
+  def _forget: (Integer job) -> nil
+  def _signature: (String name) -> String?
+  def _names: () -> String
+  def _limits: () -> [Integer, Integer, Integer]
+  def _now_ms: () -> Integer
+  def _f2s: (Float f) -> String
+  def _s2f: (String bytes) -> Float?
 end
