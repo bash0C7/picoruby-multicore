@@ -1,105 +1,79 @@
-/* esp32 port: unit "core1_lcg".
+/* esp32 port: one FreeRTOS task pinned to core 1.
  *
- * One FreeRTOS task pinned to core 1 and two int32 queues. The task runs the
- * kernel only; it never touches the VM, never allocates and never calls back
- * into Ruby. Every call is non-blocking except close, which waits a bounded
- * time for the task to leave its job.
+ * The task runs kernels only; it never touches the VM, never allocates and
+ * never calls back into Ruby. core 0 wakes it with a task notification after
+ * it publishes a job in the shared slots (include/multicore_engine.h).
  *
  * This file needs the ESP-IDF include paths, so it is not compiled into
  * libmruby: the firmware build definition adds it to the IDF component's SRCS.
- */
-#include <string.h>
+ * MULTICORE_STACK_BYTES is the task's stack (default 8192). */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 
 #include "../../include/multicore.h"
 
 #define WORKER_CORE         1
-#define WORKER_STACK_BYTES  4096
-#define QUEUE_DEPTH         8
-#define POLL_TICKS          10
+#define POLL_TICKS          pdMS_TO_TICKS(50)
 #define SHUTDOWN_WAIT_TICKS 300
 
-static QueueHandle_t in_queue = NULL;
-static QueueHandle_t out_queue = NULL;
 static TaskHandle_t worker = NULL;
 static volatile bool stop_requested = false;
 static volatile bool worker_done = false;
+
+#define MC_WAKE() do { if (worker != NULL) { xTaskNotifyGive(worker); } } while (0)
+#include "../../include/multicore_engine.h"
 
 static void
 worker_main(void *arg)
 {
   (void)arg;
   while (!stop_requested) {
-    int32_t n;
-    if (xQueueReceive(in_queue, &n, POLL_TICKS) != pdTRUE) {
-      continue;
-    }
-    int32_t result = MULTICORE_lcg(n);
-    while (!stop_requested) {
-      if (xQueueSend(out_queue, &result, POLL_TICKS) == pdTRUE) {
-        break;
-      }
+    ulTaskNotifyTake(pdTRUE, POLL_TICKS);
+    while (!stop_requested && mc_worker_run_one()) {
     }
   }
   worker_done = true;
   vTaskDelete(NULL);
 }
 
-int
-MULTICORE_open(const char *unit)
+uint32_t
+MULTICORE_now_ms(void)
 {
-  if (strcmp(unit, "core1_lcg") != 0) {
-    return MULTICORE_UNKNOWN_UNIT;
+  return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+int
+MULTICORE_start(void)
+{
+  if (mc_running) {
+    return MULTICORE_OK;
   }
   if (worker != NULL) {
+    /* A stop that timed out left the task behind, still inside a kernel. */
     return MULTICORE_CORE_BUSY;
   }
-  in_queue = xQueueCreate(QUEUE_DEPTH, sizeof(int32_t));
-  out_queue = xQueueCreate(QUEUE_DEPTH, sizeof(int32_t));
-  if (in_queue == NULL || out_queue == NULL) {
-    goto fail;
-  }
+  mc_reset_slots();
   stop_requested = false;
   worker_done = false;
-  if (xTaskCreatePinnedToCore(worker_main, "multicore1", WORKER_STACK_BYTES, NULL,
+  if (xTaskCreatePinnedToCore(worker_main, "multicore1", MULTICORE_STACK_BYTES, NULL,
                               tskIDLE_PRIORITY + 1, &worker, WORKER_CORE) != pdPASS) {
     worker = NULL;
-    goto fail;
+    return MULTICORE_START_FAILED;
   }
+  mc_running = true;
   return MULTICORE_OK;
-fail:
-  if (in_queue != NULL) { vQueueDelete(in_queue); in_queue = NULL; }
-  if (out_queue != NULL) { vQueueDelete(out_queue); out_queue = NULL; }
-  return MULTICORE_START_FAILED;
 }
 
 bool
-MULTICORE_try_send(int32_t n)
+MULTICORE_stop(void)
 {
   if (worker == NULL) {
-    return false;
-  }
-  return xQueueSend(in_queue, &n, 0) == pdTRUE;
-}
-
-bool
-MULTICORE_try_receive(int32_t *out)
-{
-  if (worker == NULL) {
-    return false;
-  }
-  return xQueueReceive(out_queue, out, 0) == pdTRUE;
-}
-
-bool
-MULTICORE_close(void)
-{
-  if (worker == NULL) {
+    mc_running = false;
     return true;
   }
+  mc_running = false;
   stop_requested = true;
+  xTaskNotifyGive(worker);
   TickType_t waited = 0;
   while (!worker_done && waited < SHUTDOWN_WAIT_TICKS) {
     vTaskDelay(1);
@@ -111,9 +85,6 @@ MULTICORE_close(void)
   /* worker_done is set just before vTaskDelete(NULL); give the idle task a tick to reclaim it. */
   vTaskDelay(2);
   worker = NULL;
-  vQueueDelete(in_queue);
-  vQueueDelete(out_queue);
-  in_queue = NULL;
-  out_queue = NULL;
+  mc_reset_slots();
   return true;
 }

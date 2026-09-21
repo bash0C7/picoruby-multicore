@@ -1,54 +1,65 @@
-/* rp2040 port: unit "core1_lcg" (Pico 2 W / RP2350 and RP2040).
+/* rp2040 port (Pico 2 W / RP2350 and RP2040): core 1 runs the kernels.
  *
- * Core 1 runs the kernel and nothing else. The worker is RAM resident
- * (__not_in_flash_func) and only touches the inter-core FIFO through the
- * pico-sdk's inline accessors, so it never calls into flash, btstack, cyw43 or
- * lwIP. Reading the BOOTSEL button drives the QSPI chip select and stays on
- * core 0.
+ * The worker loop and the dispatch (mc_worker_run_one) are RAM resident
+ * (__not_in_flash_func). The two cores talk through the shared slots
+ * (include/multicore_engine.h): a state flag plus memory barriers (__dmb), and
+ * SEV / WFE as the doorbell. The hardware FIFO is not used to carry anything;
+ * it is only probed once to see whether core 1 is free and drained, and no FIFO
+ * word ever reaches Ruby.
  *
- * Core 1 is a single resource: picoruby-psg launches it too. MULTICORE_open
- * probes the inter-core FIFO first and reports MULTICORE_CORE_BUSY when core 1
- * is already running someone else's code, instead of resetting it from under
- * them.
+ * Core 1 is a single resource: picoruby-psg launches it too. MULTICORE_start
+ * probes it first and reports MULTICORE_CORE_BUSY when it is already running
+ * someone else's code, instead of resetting it from under them.
+ *
+ * Reading the BOOTSEL button drives the QSPI chip select and stays on core 0.
  *
  * This file needs the pico-sdk include paths, so it is not compiled into
  * libmruby: the firmware build definition adds it to the CMake source list.
- */
-#include <string.h>
+ * MULTICORE_STACK_BYTES is core 1's stack (default 8192). */
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
-#include "hardware/structs/sio.h"
+#include "hardware/sync.h"
 
 #include "../../include/multicore.h"
-
-/* Jobs are 0..0x7fffffff, so the high bit marks the control words. */
-#define CMD_STOP     0xffffffffu
-#define ACK_READY    0x80000001u
-#define ACK_STOPPED  0x80000002u
 
 #define READY_TIMEOUT_US  100000
 #define STOP_TIMEOUT_US   500000
 
-static bool running;
+static volatile bool stop_requested;
+static volatile bool worker_ready;
+static volatile bool worker_parked;
+static bool started;
+static uint32_t core1_stack[MULTICORE_STACK_BYTES / 4] __attribute__((aligned(8)));
+
+#define MC_BARRIER() __dmb()
+#define MC_WAKE() __sev()
+#define MC_FUNC(name) __not_in_flash_func(name)
+#include "../../include/multicore_engine.h"
 
 static void
-__not_in_flash_func(multicore_worker_main)(void)
+__not_in_flash_func(worker_main)(void)
 {
-  multicore_fifo_push_blocking_inline(ACK_READY);
-  while (true) {
-    while (!multicore_fifo_rvalid()) {
-      tight_loop_contents();
+  worker_ready = true;
+  MC_BARRIER();
+  while (!stop_requested) {
+    if (!mc_worker_run_one()) {
+      /* SEV sets the event flag even when core 1 is not waiting yet, so a job
+       * queued between the scan and this WFE is not missed. */
+      __wfe();
     }
-    uint32_t word = sio_hw->fifo_rd;
-    if (word == CMD_STOP) {
-      multicore_fifo_push_blocking_inline(ACK_STOPPED);
-      /* Core 0 resets this core right after the ack. */
-      while (true) {
-        tight_loop_contents();
-      }
-    }
-    multicore_fifo_push_blocking_inline((uint32_t)MULTICORE_lcg((int32_t)word));
   }
+  worker_parked = true;
+  MC_BARRIER();
+  /* Core 0 resets this core once it sees worker_parked. */
+  while (true) {
+    tight_loop_contents();
+  }
+}
+
+uint32_t
+MULTICORE_now_ms(void)
+{
+  return to_ms_since_boot(get_absolute_time());
 }
 
 /* True when core 1 sits in the bootrom's wait-for-vector loop, which echoes
@@ -71,68 +82,57 @@ core1_is_free(void)
 }
 
 int
-MULTICORE_open(const char *unit)
+MULTICORE_start(void)
 {
-  if (strcmp(unit, "core1_lcg") != 0) {
-    return MULTICORE_UNKNOWN_UNIT;
+  if (mc_running) {
+    return MULTICORE_OK;
   }
-  if (running) {
-    return MULTICORE_CORE_BUSY;
-  }
-  if (!core1_is_free()) {
+  if (started || !core1_is_free()) {
     return MULTICORE_CORE_BUSY;
   }
   multicore_fifo_drain();
-  multicore_launch_core1(multicore_worker_main);
-  uint32_t ack;
-  if (!multicore_fifo_pop_timeout_us(READY_TIMEOUT_US, &ack) || ack != ACK_READY) {
-    multicore_reset_core1();
-    multicore_fifo_drain();
-    return MULTICORE_START_FAILED;
+  mc_reset_slots();
+  stop_requested = false;
+  worker_ready = false;
+  worker_parked = false;
+  MC_BARRIER();
+  multicore_launch_core1_with_stack(worker_main, core1_stack, sizeof(core1_stack));
+  uint64_t deadline = time_us_64() + READY_TIMEOUT_US;
+  while (!worker_ready) {
+    if (time_us_64() > deadline) {
+      multicore_reset_core1();
+      multicore_fifo_drain();
+      return MULTICORE_START_FAILED;
+    }
+    tight_loop_contents();
   }
-  running = true;
+  multicore_fifo_drain();
+  started = true;
+  mc_running = true;
   return MULTICORE_OK;
 }
 
 bool
-MULTICORE_try_send(int32_t n)
+MULTICORE_stop(void)
 {
-  if (!running || !multicore_fifo_wready()) {
-    return false;
-  }
-  sio_hw->fifo_wr = (uint32_t)n;
-  __sev();
-  return true;
-}
-
-bool
-MULTICORE_try_receive(int32_t *out)
-{
-  if (!running || !multicore_fifo_rvalid()) {
-    return false;
-  }
-  *out = (int32_t)sio_hw->fifo_rd;
-  return true;
-}
-
-bool
-MULTICORE_close(void)
-{
-  if (!running) {
+  if (!started) {
+    mc_running = false;
     return true;
   }
-  if (!multicore_fifo_push_timeout_us(CMD_STOP, STOP_TIMEOUT_US)) {
-    return false;
-  }
-  uint32_t word;
-  /* Results queued before the stop word come out first; drop them. */
-  while (multicore_fifo_pop_timeout_us(STOP_TIMEOUT_US, &word)) {
-    if (word == ACK_STOPPED) {
-      multicore_reset_core1();
-      multicore_fifo_drain();
-      running = false;
-      return true;
+  mc_running = false;
+  stop_requested = true;
+  MC_BARRIER();
+  __sev();
+  uint64_t deadline = time_us_64() + STOP_TIMEOUT_US;
+  while (!worker_parked) {
+    if (time_us_64() > deadline) {
+      return false;
     }
+    tight_loop_contents();
   }
-  return false;
+  multicore_reset_core1();
+  multicore_fifo_drain();
+  started = false;
+  mc_reset_slots();
+  return true;
 }
