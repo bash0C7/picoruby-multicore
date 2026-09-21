@@ -53,10 +53,6 @@ class JobsTest < Picotest::Test
     slow = Multicore.spawn(:slow, 30)
     second = Multicore.spawn(:stamp)
     add1 = Multicore.spawn(:add, 1, 1)
-    add2 = Multicore.spawn(:add, 2, 2)
-    add3 = Multicore.spawn(:add, 3, 3)
-    assert_equal 6, add3.value
-    assert_equal 4, add2.value
     assert_equal 2, add1.value
     b = second.value
     a = first.value

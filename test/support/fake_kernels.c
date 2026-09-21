@@ -350,6 +350,15 @@ k_stamp(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap)
   return write_int(++fake_stamp, out, out_cap);
 }
 
+/* live_allocs() -> allocations the host port holds right now (the job slots: 1 while running) */
+extern int multicore_host_live_allocs(void);
+static int32_t
+k_live_allocs(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap)
+{
+  (void)in; (void)in_len;
+  return write_int(multicore_host_live_allocs(), out, out_cap);
+}
+
 /* init_calls() -> how many times a kernel's init has run */
 static int32_t
 k_init_calls(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap)
@@ -393,7 +402,7 @@ SIGNED_ECHO(poly, "(untyped) -> untyped")
 #define KS(n) { #n, k_##n, sig_##n, fake_init, fake_error_message }
 const multicore_kernel_t multicore_kernels[] = {
   K(echo), K(add), K(scale_sum), K(reverse), K(bump), K(dbl), K(f32), K(bigstr),
-  K(slow), K(stamp), K(init_calls), K(boom), K(malformed), K(nospace), K(range), K(weird),
+  K(slow), K(stamp), K(init_calls), K(live_allocs), K(boom), K(malformed), K(nospace), K(range), K(weird),
   { "boom_silent", k_boom_silent, fake_signature, fake_init, NULL },
   KS(sym), KS(syms), KS(symhash), KS(symvals), KS(symsym), KS(tuple), KS(optsym), KS(nested),
   KS(strs), KS(strhash), KS(symkeys_strvals), KS(poly),
