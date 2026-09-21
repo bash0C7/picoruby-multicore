@@ -359,20 +359,43 @@ k_init_calls(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap)
 }
 
 static int32_t k_boom(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap) { (void)in; (void)in_len; (void)out; (void)out_cap; return -3; }
+static int32_t k_boom_silent(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap) { (void)in; (void)in_len; (void)out; (void)out_cap; return -3; }
 static int32_t k_malformed(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap) { (void)in; (void)in_len; (void)out; (void)out_cap; return -1; }
 static int32_t k_nospace(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap) { (void)in; (void)in_len; (void)out; (void)out_cap; return -2; }
 static int32_t k_range(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap) { (void)in; (void)in_len; (void)out; (void)out_cap; return -4; }
 static int32_t k_weird(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap) { (void)in; (void)in_len; (void)out; (void)out_cap; return -9; }
 
-#define K(n) { #n, k_##n, fake_signature, fake_init }
+static const char *
+fake_error_message(void)
+{
+  return "RuntimeError: bang";
+}
+
+/* Same bytes as :echo, different declared signatures: the Ruby layer turns the
+ * wire's strs into Symbols where the return type says Symbol. */
+#define SIGNED_ECHO(n, sig) \
+  static const char *sig_##n(void) { return sig; } \
+  static int32_t k_##n(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap) { return k_echo(in, in_len, out, out_cap); }
+SIGNED_ECHO(sym, "(untyped) -> Symbol")
+SIGNED_ECHO(syms, "(Array[Symbol], Hash[String, Integer]) -> Array[Symbol]")
+SIGNED_ECHO(symhash, "(untyped) -> Hash[Symbol, Float]")
+SIGNED_ECHO(symvals, "(untyped) -> Hash[String, Symbol]")
+SIGNED_ECHO(symsym, "(untyped) -> Hash[Symbol, Symbol]")
+SIGNED_ECHO(tuple, "(untyped) -> [Symbol, String, Integer]")
+SIGNED_ECHO(optsym, "(untyped) -> Symbol?")
+SIGNED_ECHO(nested, "(untyped) -> Array[Hash[Symbol, Array[Symbol]]]")
+SIGNED_ECHO(strs, "(untyped) -> Array[String]")
+SIGNED_ECHO(strhash, "(untyped) -> Hash[String, Integer]")
+SIGNED_ECHO(symkeys_strvals, "(untyped) -> Hash[Symbol, String]")
+SIGNED_ECHO(poly, "(untyped) -> untyped")
+
+#define K(n) { #n, k_##n, fake_signature, fake_init, fake_error_message }
+#define KS(n) { #n, k_##n, sig_##n, fake_init, fake_error_message }
 const multicore_kernel_t multicore_kernels[] = {
   K(echo), K(add), K(scale_sum), K(reverse), K(bump), K(dbl), K(f32), K(bigstr),
   K(slow), K(stamp), K(init_calls), K(boom), K(malformed), K(nospace), K(range), K(weird),
-  { NULL, NULL, NULL, NULL }
+  { "boom_silent", k_boom_silent, fake_signature, fake_init, NULL },
+  KS(sym), KS(syms), KS(symhash), KS(symvals), KS(symsym), KS(tuple), KS(optsym), KS(nested),
+  KS(strs), KS(strhash), KS(symkeys_strvals), KS(poly),
+  { NULL, NULL, NULL, NULL, NULL }
 };
-
-const char *
-multicore_kernel_error_message(const multicore_kernel_t *k)
-{
-  return k->call == k_boom ? "RuntimeError: bang" : NULL;
-}

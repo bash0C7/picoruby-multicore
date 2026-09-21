@@ -26,23 +26,19 @@
 #define MULTICORE_STACK_BYTES 8192
 #endif
 
-/* The kernel table. sendairk03's scripts/kernels_build.rb generates the
- * strong definition (picoruby-kernel_registry). The last entry is all NULL.
- * src/kernel_table.c supplies a weak empty table so a build without kernels
- * still links. */
+/* The kernel table. The firmware build must define `multicore_kernels`:
+ * sendairk03's scripts/kernels_build.rb generates it (picoruby-kernel_registry),
+ * empty when there are no kernels. The last entry is all NULL. There is no
+ * default, so a build without the table fails to link. */
 typedef int32_t (*multicore_kernel_fn)(const uint8_t *in, int32_t in_len, uint8_t *out, int32_t out_cap);
 typedef struct {
   const char *name;                    /* method name ("scale_sum") */
   multicore_kernel_fn call;            /* <lib>_<method>_call */
   const char *(*signature)(void);      /* <lib>_<method>_signature */
   void (*init)(void);                  /* <lib>_init: once before the first call (idempotent) */
+  const char *(*error_message)(void);  /* <lib>_error_message: the message of the exception a -3 call raised */
 } multicore_kernel_t;
 extern const multicore_kernel_t multicore_kernels[];
-
-/* Message of the exception the last call of `k` raised (status -3), or NULL.
- * The table carries no such accessor, so the default (weak) returns NULL and a
- * build that can name the library's <lib>_error_message() overrides it. */
-const char *multicore_kernel_error_message(const multicore_kernel_t *k);
 
 /* Status a kernel's call returns (>= 0 is the number of bytes written). */
 #define MULTICORE_K_MALFORMED (-1)

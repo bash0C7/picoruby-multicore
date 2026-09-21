@@ -99,7 +99,7 @@ MC_FUNC(mc_worker_run_one)(void)
   if (status >= 0) {
     len = status;
   } else if (status == MULTICORE_K_RAISED) {
-    const char *msg = multicore_kernel_error_message(k);
+    const char *msg = k->error_message != NULL ? k->error_message() : NULL;
     if (msg == NULL) {
       msg = "the kernel raised";
     }

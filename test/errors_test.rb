@@ -48,6 +48,13 @@ class ErrorsTest < Picotest::Test
     assert e.message.include?("boom")
   end
 
+  def test_a_kernel_without_an_error_message_still_raises_kernel_error
+    e = failure { Multicore.run(:boom_silent) }
+    assert e.is_a?(Multicore::KernelError)
+    assert e.message.include?("boom_silent")
+    assert e.message.include?("the kernel raised")
+  end
+
   def test_an_integer_out_of_range_raises_range_error
     assert failure { Multicore.run(:range) }.is_a?(Multicore::RangeError)
   end
