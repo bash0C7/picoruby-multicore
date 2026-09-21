@@ -3,6 +3,8 @@ class Multicore
   end
   class CoreBusy < Error
   end
+  class NoMemory < Error
+  end
   class UnknownKernel < Error
   end
   class QueueFull < Error

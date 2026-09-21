@@ -19,6 +19,8 @@ class Multicore
   end
   class CoreBusy < Error
   end
+  class NoMemory < Error
+  end
   class UnknownKernel < Error
   end
   class QueueFull < Error
@@ -666,6 +668,8 @@ class Multicore
     st = _start
     if st == 2
       raise Multicore::CoreBusy, "the second core is in use by something else (picoruby-psg?)"
+    elsif st == 4
+      raise Multicore::NoMemory, "not enough memory for the job slots of the worker"
     elsif st != 0
       raise Multicore::Error, "the worker could not be started"
     end

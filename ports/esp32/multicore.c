@@ -4,6 +4,9 @@
  * never calls back into Ruby. core 0 wakes it with a task notification after
  * it publishes a job in the shared slots (include/multicore_engine.h).
  *
+ * The slots are allocated with malloc in MULTICORE_start (ESP-IDF's heap is safe from both
+ * cores) and freed in MULTICORE_stop once the task is gone; the task itself never allocates.
+ *
  * This file needs the ESP-IDF include paths, so it is not compiled into
  * libmruby: the firmware build definition adds it to the IDF component's SRCS.
  * MULTICORE_STACK_BYTES is the task's stack (default 8192). */
@@ -52,12 +55,15 @@ MULTICORE_start(void)
     /* A stop that timed out left the task behind, still inside a kernel. */
     return MULTICORE_CORE_BUSY;
   }
-  mc_reset_slots();
+  if (!mc_alloc_slots()) {
+    return MULTICORE_NO_MEMORY;
+  }
   stop_requested = false;
   worker_done = false;
   if (xTaskCreatePinnedToCore(worker_main, "multicore1", MULTICORE_STACK_BYTES, NULL,
                               tskIDLE_PRIORITY + 1, &worker, WORKER_CORE) != pdPASS) {
     worker = NULL;
+    mc_free_slots();
     return MULTICORE_START_FAILED;
   }
   mc_running = true;
@@ -85,6 +91,6 @@ MULTICORE_stop(void)
   /* worker_done is set just before vTaskDelete(NULL); give the idle task a tick to reclaim it. */
   vTaskDelay(2);
   worker = NULL;
-  mc_reset_slots();
+  mc_free_slots();
   return true;
 }

@@ -11,8 +11,10 @@
  * table below and calls it. The worker never touches the VM.
  *
  * Build-time constants (override with -D on the compiler command line of the
- * port). Each job slot holds one input and one output buffer, so RAM use is
- * MULTICORE_QUEUE_DEPTH * (MULTICORE_IN_CAP + MULTICORE_OUT_CAP) bytes. */
+ * port). Each job slot holds one input and one output buffer plus 28 bytes of
+ * bookkeeping. The slots (and on rp2040 core 1's stack) are allocated with
+ * malloc by MULTICORE_start on the VM's core and freed by MULTICORE_stop once
+ * the worker has really stopped; nothing is reserved while no worker runs. */
 #ifndef MULTICORE_IN_CAP
 #define MULTICORE_IN_CAP 4096
 #endif
@@ -20,7 +22,7 @@
 #define MULTICORE_OUT_CAP 4096
 #endif
 #ifndef MULTICORE_QUEUE_DEPTH
-#define MULTICORE_QUEUE_DEPTH 8
+#define MULTICORE_QUEUE_DEPTH 4
 #endif
 #ifndef MULTICORE_STACK_BYTES
 #define MULTICORE_STACK_BYTES 8192
@@ -51,6 +53,7 @@ extern const multicore_kernel_t multicore_kernels[];
 #define MULTICORE_OK           0
 #define MULTICORE_CORE_BUSY    2
 #define MULTICORE_START_FAILED 3
+#define MULTICORE_NO_MEMORY    4  /* malloc returned NULL; nothing is left allocated */
 
 /* MULTICORE_submit() failures (a job id is >= 0). */
 #define MULTICORE_E_NOT_RUNNING   (-1)
@@ -63,11 +66,12 @@ extern const multicore_kernel_t multicore_kernels[];
 #define MULTICORE_JOB_DONE    1
 #define MULTICORE_JOB_UNKNOWN (-1)
 
-/* Take the core and start the worker. Idempotent while running. */
+/* Take the core, allocate the slots and start the worker. Idempotent while running. */
 int MULTICORE_start(void);
 
-/* Stop the worker and release the core; every job is dropped. False when the
- * worker is still inside a kernel after the bounded wait; call again later. */
+/* Stop the worker, release the core and free the slots; every job is dropped. False when the
+ * worker is still inside a kernel after the bounded wait: everything stays allocated,
+ * call again later. */
 bool MULTICORE_stop(void);
 
 bool MULTICORE_running(void);

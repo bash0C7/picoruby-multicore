@@ -17,11 +17,19 @@
 #ifndef PICORUBY_MULTICORE_ENGINE_H_
 #define PICORUBY_MULTICORE_ENGINE_H_
 
+#include <stdlib.h>
 #include <string.h>
 #include "multicore.h"
 
 #ifndef MC_BARRIER
 #define MC_BARRIER() __sync_synchronize()
+#endif
+/* The slots are allocated on core 0, before the worker starts; the worker never allocates. */
+#ifndef MC_MALLOC
+#define MC_MALLOC(n) malloc(n)
+#endif
+#ifndef MC_FREE
+#define MC_FREE(p) free(p)
 #endif
 #ifndef MC_FUNC
 #define MC_FUNC(name) name
@@ -50,20 +58,32 @@ typedef struct {
   uint8_t out[MULTICORE_OUT_CAP];
 } mc_slot_t;
 
-static mc_slot_t mc_slots[MULTICORE_QUEUE_DEPTH];
+static mc_slot_t *mc_slots;  /* NULL while no worker runs */
 static uint32_t mc_next_seq = 1;
 static uint8_t mc_inited[MULTICORE_MAX_KERNELS];
 static bool mc_running;  /* core 0 only */
 
-static void
-mc_reset_slots(void)
+/* All slots FREE. False when malloc fails, leaving nothing allocated. */
+static bool
+mc_alloc_slots(void)
 {
-  int i;
-  for (i = 0; i < MULTICORE_QUEUE_DEPTH; i++) {
-    MC_SET(mc_slots[i].state, MC_FREE);
-    MC_SET(mc_slots[i].forget, 0);
+  mc_slots = (mc_slot_t *)MC_MALLOC(sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH);
+  if (mc_slots == NULL) {
+    return false;
   }
+  memset(mc_slots, 0, sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH);
   MC_BARRIER();
+  return true;
+}
+
+/* Only after the worker has really stopped. */
+static void
+mc_free_slots(void)
+{
+  if (mc_slots != NULL) {
+    MC_FREE(mc_slots);
+    mc_slots = NULL;
+  }
 }
 
 /* Runs the oldest queued job, if any, on the calling (worker) core. */
@@ -71,9 +91,10 @@ static bool
 MC_FUNC(mc_worker_run_one)(void)
 {
   mc_slot_t *best = NULL;
+  mc_slot_t *slots = mc_slots;
   int i;
   for (i = 0; i < MULTICORE_QUEUE_DEPTH; i++) {
-    mc_slot_t *s = &mc_slots[i];
+    mc_slot_t *s = &slots[i];
     if (MC_GET(s->state) == MC_QUEUED && (best == NULL || (int32_t)(s->seq - best->seq) < 0)) {
       best = s;
     }
@@ -132,6 +153,9 @@ static mc_slot_t *
 mc_find_job(int32_t job)
 {
   int i;
+  if (mc_slots == NULL) {
+    return NULL;
+  }
   for (i = 0; i < MULTICORE_QUEUE_DEPTH; i++) {
     if (MC_GET(mc_slots[i].state) != MC_FREE && (int32_t)(mc_slots[i].seq & 0x7fffffffu) == job) {
       return &mc_slots[i];

@@ -15,7 +15,8 @@
  *
  * This file needs the pico-sdk include paths, so it is not compiled into
  * libmruby: the firmware build definition adds it to the CMake source list.
- * MULTICORE_STACK_BYTES is core 1's stack (default 8192). */
+ * MULTICORE_STACK_BYTES is core 1's stack (default 8192), and it and the job slots are malloc'd in
+ * MULTICORE_start and freed in MULTICORE_stop once core 1 has parked; the worker never allocates. */
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "hardware/sync.h"
@@ -29,7 +30,12 @@ static volatile bool stop_requested;
 static volatile bool worker_ready;
 static volatile bool worker_parked;
 static bool started;
-static uint32_t core1_stack[MULTICORE_STACK_BYTES / 4] __attribute__((aligned(8)));
+/* Core 1's stack is malloc'd in MULTICORE_start: multicore_launch_core1_with_stack wants the lowest
+ * address (word aligned; 8 bytes here to honour the AAPCS) and a size in bytes (a multiple of 4; here
+ * of 8). core1_stack_raw is what malloc returned and what gets freed. */
+#define CORE1_STACK_BYTES (MULTICORE_STACK_BYTES & ~(size_t)7)
+static void *core1_stack_raw;
+static uint32_t *core1_stack;
 
 #define MC_BARRIER() __dmb()
 #define MC_WAKE() __sev()
@@ -90,18 +96,29 @@ MULTICORE_start(void)
   if (started || !core1_is_free()) {
     return MULTICORE_CORE_BUSY;
   }
+  if (!mc_alloc_slots()) {
+    return MULTICORE_NO_MEMORY;
+  }
+  core1_stack_raw = malloc(CORE1_STACK_BYTES + 8);
+  if (core1_stack_raw == NULL) {
+    mc_free_slots();
+    return MULTICORE_NO_MEMORY;
+  }
+  core1_stack = (uint32_t *)(((uintptr_t)core1_stack_raw + 7u) & ~(uintptr_t)7u);
   multicore_fifo_drain();
-  mc_reset_slots();
   stop_requested = false;
   worker_ready = false;
   worker_parked = false;
   MC_BARRIER();
-  multicore_launch_core1_with_stack(worker_main, core1_stack, sizeof(core1_stack));
+  multicore_launch_core1_with_stack(worker_main, core1_stack, CORE1_STACK_BYTES);
   uint64_t deadline = time_us_64() + READY_TIMEOUT_US;
   while (!worker_ready) {
     if (time_us_64() > deadline) {
       multicore_reset_core1();
       multicore_fifo_drain();
+      free(core1_stack_raw);
+      core1_stack_raw = NULL;
+      mc_free_slots();
       return MULTICORE_START_FAILED;
     }
     tight_loop_contents();
@@ -133,6 +150,8 @@ MULTICORE_stop(void)
   multicore_reset_core1();
   multicore_fifo_drain();
   started = false;
-  mc_reset_slots();
+  free(core1_stack_raw);
+  core1_stack_raw = NULL;
+  mc_free_slots();
   return true;
 }
