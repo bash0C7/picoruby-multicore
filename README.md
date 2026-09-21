@@ -69,13 +69,16 @@ The same input gives the same result on every port.
 ## Layout
 
 ```
-mrblib/multicore.rb     Multicore, Multicore::Error, scalar check (shared Ruby)
-include/multicore.h     C contract shared by all ports
-src/                    per-VM bindings (mruby, mruby/c)
+mrblib/multicore.rb     Multicore, Multicore::Error, the Integer check and every message
+include/multicore.h     C contract and the kernel, shared by all ports
+src/multicore.c         per-VM dispatch (src/mruby/, src/mrubyc/)
 ports/host/             runs the kernel on the calling thread
 ports/esp32/            FreeRTOS task and queue on core 1
 ports/rp2040/           pico-sdk multicore on core 1
 ```
+
+The C side never raises: it returns a status or a boolean, and the Ruby layer
+turns that into `Multicore::Error`. Both VMs therefore share one set of messages.
 
 ## Error handling
 

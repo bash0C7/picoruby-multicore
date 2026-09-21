@@ -1,0 +1,16 @@
+class Multicore
+  class Error < StandardError
+  end
+
+  JOB_MAX: Integer
+
+  def initialize: (unit: Symbol | String) -> void
+  def send: (Integer value) -> nil
+  def take: () -> Integer?
+  def close: () -> nil
+
+  private def _open: (String unit) -> Integer
+  private def _send: (Integer value) -> bool
+  private def _take: () -> Integer?
+  private def _close: () -> bool
+end
