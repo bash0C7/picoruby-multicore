@@ -12,12 +12,17 @@
  * MULTICORE_STACK_BYTES is the task's stack (default 8192). */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_system.h"
 
 #include "../../include/multicore.h"
 
 #define WORKER_CORE         1
 #define POLL_TICKS          pdMS_TO_TICKS(50)
 #define SHUTDOWN_WAIT_TICKS 300
+
+#define TAG "multicore"
 
 static TaskHandle_t worker = NULL;
 static volatile bool stop_requested = false;
@@ -45,6 +50,11 @@ MULTICORE_now_ms(void)
   return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
+/* The three heap figures the start logs, so a NoMemory on a board can be read against the headroom. */
+#define HEAP_FMT "largest free block %u, free heap %u, minimum free heap ever %u"
+#define HEAP_ARGS (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), \
+                  (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size()
+
 int
 MULTICORE_start(void)
 {
@@ -55,7 +65,11 @@ MULTICORE_start(void)
     /* A stop that timed out left the task behind, still inside a kernel. */
     return MULTICORE_CORE_BUSY;
   }
+  ESP_LOGI(TAG, "start: " HEAP_FMT " (slots need %u bytes, task stack %u bytes)", HEAP_ARGS,
+           (unsigned)(sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH), (unsigned)MULTICORE_STACK_BYTES);
   if (!mc_alloc_slots()) {
+    ESP_LOGE(TAG, "job slots: malloc of %u bytes failed: " HEAP_FMT,
+             (unsigned)(sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH), HEAP_ARGS);
     return MULTICORE_NO_MEMORY;
   }
   stop_requested = false;
@@ -64,6 +78,8 @@ MULTICORE_start(void)
                               tskIDLE_PRIORITY + 1, &worker, WORKER_CORE) != pdPASS) {
     worker = NULL;
     mc_free_slots();
+    ESP_LOGE(TAG, "task stack: creating the task (%u byte stack) failed: " HEAP_FMT,
+             (unsigned)MULTICORE_STACK_BYTES, HEAP_ARGS);
     return MULTICORE_START_FAILED;
   }
   mc_running = true;
