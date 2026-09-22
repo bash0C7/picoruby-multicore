@@ -11,6 +11,9 @@
 extern int multicore_host_live_allocs(void);
 extern void multicore_host_fail_after(int n);
 
+/* the slot array, then an input and an output buffer per slot */
+#define BLOCKS (1 + 2 * MULTICORE_QUEUE_DEPTH)
+
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); failures++; } } while (0)
 
@@ -37,7 +40,7 @@ main(void)
   for (round = 0; round < 200; round++) {
     int32_t ids[MULTICORE_QUEUE_DEPTH];
     CHECK(MULTICORE_start() == MULTICORE_OK);
-    CHECK(multicore_host_live_allocs() == 1);
+    CHECK(multicore_host_live_allocs() == BLOCKS);
     for (i = 0; i < MULTICORE_QUEUE_DEPTH; i++) {
       ids[i] = i % 2 ? MULTICORE_submit("stamp", stamp_in, 1) : MULTICORE_submit("add", add_in, 3);
       CHECK(ids[i] >= 0);
@@ -57,10 +60,17 @@ main(void)
     CHECK(MULTICORE_poll(ids[0]) == MULTICORE_JOB_UNKNOWN);  /* the slots are gone */
   }
 
-  /* an allocation that fails leaves nothing allocated and nothing running */
-  multicore_host_fail_after(0);
-  CHECK(MULTICORE_start() == MULTICORE_NO_MEMORY);
-  CHECK(!MULTICORE_running());
+  /* whichever allocation fails (first, each middle one, last), nothing stays allocated or running */
+  for (i = 0; i < BLOCKS; i++) {
+    multicore_host_fail_after(i);
+    CHECK(MULTICORE_start() == MULTICORE_NO_MEMORY);
+    CHECK(!MULTICORE_running());
+    CHECK(multicore_host_live_allocs() == 0);
+  }
+  multicore_host_fail_after(BLOCKS);  /* one past the last: the start succeeds */
+  CHECK(MULTICORE_start() == MULTICORE_OK);
+  CHECK(multicore_host_live_allocs() == BLOCKS);
+  CHECK(MULTICORE_stop());
   CHECK(multicore_host_live_allocs() == 0);
   multicore_host_fail_after(-1);
   CHECK(MULTICORE_start() == MULTICORE_OK);
@@ -74,9 +84,9 @@ main(void)
     CHECK(id >= 0);
     usleep(100000);  /* let the worker pick the job up */
     CHECK(!MULTICORE_stop());
-    CHECK(multicore_host_live_allocs() == 1);
+    CHECK(multicore_host_live_allocs() == BLOCKS);
     CHECK(MULTICORE_start() == MULTICORE_CORE_BUSY);
-    CHECK(multicore_host_live_allocs() == 1);
+    CHECK(multicore_host_live_allocs() == BLOCKS);
     sleep(1);
     CHECK(MULTICORE_stop());
     CHECK(multicore_host_live_allocs() == 0);

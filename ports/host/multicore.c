@@ -3,9 +3,10 @@
  *
  * MULTICORE_HOST_CORE_BUSY=1 in the environment (any other value clears it) makes MULTICORE_start report
  * that the core is taken, the way a board reports it when another user holds
- * core 1. MULTICORE_HOST_FAIL_ALLOC=1 makes every allocation fail (start then reports
- * MULTICORE_NO_MEMORY). The allocator counts live allocations and can fail the Nth one
- * (multicore_host_fail_after), so the tests can check for leaks and for the failure path. */
+ * core 1. MULTICORE_HOST_FAIL_ALLOC=n (n >= 1) makes the n-th allocation of the next start fail
+ * (start then reports MULTICORE_NO_MEMORY). The allocator counts live allocations and can fail one
+ * allocation once (multicore_host_fail_after), so the tests can check for leaks and for the failure
+ * path at every step. */
 #define _POSIX_C_SOURCE 200809L
 #include <pthread.h>
 #include <stdlib.h>
@@ -33,13 +34,13 @@ host_wake(void)
 }
 
 static int live_allocs;
-static int fail_after = -1;  /* fail the allocation after this many more; -1 never */
-static bool fail_all;
+static int fail_after = -1;  /* fail the allocation after this many more succeed, once; -1 never */
 
 static void *
 host_malloc(size_t n)
 {
-  if (fail_all || fail_after == 0) {
+  if (fail_after == 0) {
+    fail_after = -1;
     return NULL;
   }
   if (fail_after > 0) {
@@ -132,7 +133,9 @@ MULTICORE_start(void)
   if (core_busy_requested()) {
     return MULTICORE_CORE_BUSY;
   }
-  fail_all = getenv("MULTICORE_HOST_FAIL_ALLOC") != NULL && getenv("MULTICORE_HOST_FAIL_ALLOC")[0] == '1';
+  if (getenv("MULTICORE_HOST_FAIL_ALLOC") != NULL && atoi(getenv("MULTICORE_HOST_FAIL_ALLOC")) > 0) {
+    fail_after = atoi(getenv("MULTICORE_HOST_FAIL_ALLOC")) - 1;
+  }
   if (!mc_alloc_slots()) {
     return MULTICORE_NO_MEMORY;
   }

@@ -54,8 +54,8 @@ typedef struct {
   int32_t in_len;
   int32_t status;
   int32_t out_len;
-  uint8_t in[MULTICORE_IN_CAP];
-  uint8_t out[MULTICORE_OUT_CAP];
+  uint8_t *in;   /* MULTICORE_IN_CAP bytes, its own malloc block */
+  uint8_t *out;  /* MULTICORE_OUT_CAP bytes, its own malloc block */
 } mc_slot_t;
 
 static mc_slot_t *mc_slots;  /* NULL while no worker runs */
@@ -63,27 +63,82 @@ static uint32_t mc_next_seq = 1;
 static uint8_t mc_inited[MULTICORE_MAX_KERNELS];
 static bool mc_running;  /* core 0 only */
 
-/* All slots FREE. False when malloc fails, leaving nothing allocated. */
-static bool
-mc_alloc_slots(void)
-{
-  mc_slots = (mc_slot_t *)MC_MALLOC(sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH);
-  if (mc_slots == NULL) {
-    return false;
-  }
-  memset(mc_slots, 0, sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH);
-  MC_BARRIER();
-  return true;
-}
+/* Where the last mc_alloc_slots failed, for the port's log: what (slot array, or the input / output
+ * buffer of slot `index`), how many bytes were asked and how many blocks were allocated before it. */
+static struct {
+  const char *what;
+  int index;
+  size_t bytes;
+  int blocks_before;
+} mc_alloc_failure;
+
+/* The slot array and every buffer are separate small blocks, so the largest contiguous request is
+ * max(MULTICORE_IN_CAP, MULTICORE_OUT_CAP) however deep the queue is. */
+#define MC_BLOCKS (1 + 2 * MULTICORE_QUEUE_DEPTH)
+#define MC_SLOTS_BYTES (sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH + \
+                        (size_t)MULTICORE_QUEUE_DEPTH * (MULTICORE_IN_CAP + MULTICORE_OUT_CAP))
 
 /* Only after the worker has really stopped. */
 static void
 mc_free_slots(void)
 {
-  if (mc_slots != NULL) {
-    MC_FREE(mc_slots);
-    mc_slots = NULL;
+  int i;
+  if (mc_slots == NULL) {
+    return;
   }
+  for (i = 0; i < MULTICORE_QUEUE_DEPTH; i++) {
+    if (mc_slots[i].in != NULL) {
+      MC_FREE(mc_slots[i].in);
+    }
+    if (mc_slots[i].out != NULL) {
+      MC_FREE(mc_slots[i].out);
+    }
+  }
+  MC_FREE(mc_slots);
+  mc_slots = NULL;
+}
+
+/* All slots FREE. False when a malloc fails: everything already allocated is freed and
+ * mc_alloc_failure says which block it was. */
+static bool
+mc_alloc_slots(void)
+{
+  int i;
+  int blocks = 0;
+  mc_slots = (mc_slot_t *)MC_MALLOC(sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH);
+  if (mc_slots == NULL) {
+    mc_alloc_failure.what = "slot array";
+    mc_alloc_failure.index = -1;
+    mc_alloc_failure.bytes = sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH;
+    mc_alloc_failure.blocks_before = 0;
+    return false;
+  }
+  blocks++;
+  memset(mc_slots, 0, sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH);
+  for (i = 0; i < MULTICORE_QUEUE_DEPTH; i++) {
+    mc_slots[i].in = (uint8_t *)MC_MALLOC(MULTICORE_IN_CAP);
+    if (mc_slots[i].in == NULL) {
+      mc_alloc_failure.what = "input buffer";
+      mc_alloc_failure.index = i;
+      mc_alloc_failure.bytes = MULTICORE_IN_CAP;
+      mc_alloc_failure.blocks_before = blocks;
+      mc_free_slots();
+      return false;
+    }
+    blocks++;
+    mc_slots[i].out = (uint8_t *)MC_MALLOC(MULTICORE_OUT_CAP);
+    if (mc_slots[i].out == NULL) {
+      mc_alloc_failure.what = "output buffer";
+      mc_alloc_failure.index = i;
+      mc_alloc_failure.bytes = MULTICORE_OUT_CAP;
+      mc_alloc_failure.blocks_before = blocks;
+      mc_free_slots();
+      return false;
+    }
+    blocks++;
+  }
+  MC_BARRIER();
+  return true;
 }
 
 /* Runs the oldest queued job, if any, on the calling (worker) core. */

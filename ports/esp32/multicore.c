@@ -65,11 +65,14 @@ MULTICORE_start(void)
     /* A stop that timed out left the task behind, still inside a kernel. */
     return MULTICORE_CORE_BUSY;
   }
-  ESP_LOGI(TAG, "start: " HEAP_FMT " (slots need %u bytes, task stack %u bytes)", HEAP_ARGS,
-           (unsigned)(sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH), (unsigned)MULTICORE_STACK_BYTES);
+  ESP_LOGI(TAG, "start: " HEAP_FMT " (slots need %u bytes in %d blocks, the largest %u bytes; task stack %u bytes)", HEAP_ARGS,
+           (unsigned)MC_SLOTS_BYTES, MC_BLOCKS,
+           (unsigned)(MULTICORE_IN_CAP > MULTICORE_OUT_CAP ? MULTICORE_IN_CAP : MULTICORE_OUT_CAP),
+           (unsigned)MULTICORE_STACK_BYTES);
   if (!mc_alloc_slots()) {
-    ESP_LOGE(TAG, "job slots: malloc of %u bytes failed: " HEAP_FMT,
-             (unsigned)(sizeof(mc_slot_t) * MULTICORE_QUEUE_DEPTH), HEAP_ARGS);
+    ESP_LOGE(TAG, "job slots: malloc of %u bytes failed for the %s of slot %d (%d of %d blocks allocated before it): " HEAP_FMT,
+             (unsigned)mc_alloc_failure.bytes, mc_alloc_failure.what, mc_alloc_failure.index,
+             mc_alloc_failure.blocks_before, MC_BLOCKS, HEAP_ARGS);
     return MULTICORE_NO_MEMORY;
   }
   stop_requested = false;
