@@ -92,13 +92,18 @@ class RoundtripTest < Picotest::Test
   end
 
   def test_floats_come_back_bit_for_bit
-    nan = 0.0 / 0.0
+    nan_bytes = ""
+    [0x7f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00].each { |n| nan_bytes << n.chr }
+    nan = Multicore.core._s2f(nan_bytes)
     inf = 1.0 / 0.0
     [1.5, -2.25, 0.1, 1e300, -1e-300, inf, -inf, -0.0, 0.0, 5.0e-324, 2.2250738585072014e-308].each do |f|
       assert_equal bits(f), bits(echo(f))
     end
     # The wire keeps a NaN's bytes, but mruby stamps a serial number into the payload of every
     # NaN the VM makes, so only the NaN pattern itself (sign, exponent, quiet bit) is compared.
+    # `nan` is built from an explicit bit pattern, not `0.0 / 0.0`: the sign a CPU gives that
+    # division's result is architecture-defined (ARM's default NaN has it clear, x86's
+    # "indefinite" NaN has it set), which made this assertion depend on the host's CPU.
     r = echo(nan)
     assert r != r
     b = bits(r)
