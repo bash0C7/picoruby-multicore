@@ -20,13 +20,10 @@ a CRuby oracle before it ever reaches a board — not a second Ruby VM running
 somewhere you can't see it.
 
 > **Status.** The Ruby API and the C contract are settled. The `host` port is
-> tested on both VMs. The `esp32` port is verified on hardware (M5Stack Chain
-> DualKey): every argument/return type pattern and every exception matches a
-> CRuby oracle exactly. The `rp2040` port compiles but is not yet verified on
-> a board — a heap-exhaustion bug in the R2P2 harness's own Pico 2 W firmware
-> (unrelated to this gem; the same hang reproduces with no `multicore` code at
-> all) currently blocks running any externally-compiled `.mrb` on that board.
-> Tracked at https://github.com/bash0C7/R2P2-dev-harness/issues/23.
+> tested on both VMs. The `esp32` port (M5Stack Chain DualKey) and the
+> `rp2040` port (Raspberry Pi Pico 2 W) are both verified on hardware: every
+> argument/return type pattern, `spawn`, `open`, and every exception matches a
+> CRuby oracle exactly.
 
 ## Installation
 
@@ -97,6 +94,84 @@ the table is a hand-written set of fake kernels in `test/support/fake_kernels.c`
 
 `run` reads `timeout_ms` from a trailing `{ timeout_ms: n }` Hash. A Hash
 argument whose only key is `:timeout_ms` therefore cannot be the last argument.
+
+## Walkthrough: a kernel on ESP32 (Chain DualKey)
+
+This walks through the whole path from a Ruby method to a value that came back from the other core,
+on an ESP32 (M5Stack Chain DualKey, ESP-IDF).
+
+### 1. Write the kernel
+
+A kernel is a top-level Ruby method with its types spelled out as inline RBS on the line above it:
+
+```ruby
+# n-th Fibonacci number mod 1_000_000_007, so it stays inside the kernel's Integer width.
+#: (Integer) -> Integer
+def fib(n)
+  a = 0
+  b = 1
+  i = 0
+  while i < n
+    t = (a + b) % 1_000_000_007
+    a = b
+    b = t
+    i += 1
+  end
+  a
+end
+```
+
+It is ordinary Ruby: run it under CRuby first and check the answer before it ever reaches a board.
+
+### 2. Compile it into a `multicore_kernels` table
+
+This gem does not compile Ruby itself; a build turns `.rb` kernel files into native code with
+[spinel](https://github.com/matz/spinel) and wraps them into the `multicore_kernels` table (see
+[The kernel table](#the-kernel-table) below) with [suppify](https://github.com/bash0C7/suppify). A
+worked, tested setup for this step is `bash0C7/sendairk03`'s `docs/kernels.md`: drop the file under a
+`kernels/` directory, and its `rake esp32:build` finds it, builds it, and links the generated gem in —
+no separate command to remember.
+
+### 3. Add this gem and its ESP32 port to the firmware
+
+In the build configuration:
+
+```ruby
+conf.gem github: 'bash0C7/picoruby-multicore', branch: 'main'
+```
+
+In the ESP-IDF component's `CMakeLists.txt`, add `ports/esp32/multicore.c` to `idf_component_register`'s
+`SRCS` (next to the other picoruby port sources it already lists):
+
+```cmake
+idf_component_register(
+    SRCS
+    # ...
+    ${MULTICORE_GEM_DIR}/ports/esp32/multicore.c
+    # ...
+)
+```
+
+### 4. Call it from Ruby
+
+```ruby
+require "multicore"
+
+puts "fib(40) => #{Multicore.run(:fib, 40).inspect}"
+```
+
+### 5. Flash it and read the answer
+
+Flash the firmware and run the app. On Chain DualKey hardware this line prints:
+
+```
+fib(40) => 102334155
+```
+
+The worker started on core 1 for this call and freed its job slot afterward; `Multicore.run` blocked
+the calling task until the value came back. Every kernel in this walkthrough's family (numeric, String,
+Symbol, Array, Hash, `spawn`, `open`, and the `Multicore::KernelError` / `TypeError` / `RangeError`
+paths) has been run this way on this hardware and every value matched a CRuby oracle exactly.
 
 ## Types
 
@@ -248,8 +323,8 @@ The Ruby layer stays inside the mruby/c subset.
 The host tests run through the PicoRuby harness (picotest) on both VMs, with
 the pthread port and the fake kernels. `test/c/run.sh` builds `test/c/engine_test.c` against the host port
 and runs it under ThreadSanitizer and AddressSanitizer: start / close cycles, the allocation failure
-path and close while a kernel runs, with the host port counting live allocations. `esp32` board behavior
-is verified on hardware (see Status above); `rp2040` is not yet, for reasons unrelated to this gem.
+path and close while a kernel runs, with the host port counting live allocations. `esp32` and `rp2040`
+board behavior are both verified on hardware (see Status above).
 
 ## License
 
