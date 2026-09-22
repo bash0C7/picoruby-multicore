@@ -12,9 +12,14 @@ an exception.
 The Ruby VM stays on its own core. The kernel runs on the other one and never
 touches the VM.
 
-> **Status: DRAFT.** The Ruby API and the C contract are settled. The `host`
-> port is tested on both VMs; the `esp32` and `rp2040` ports have been compiled
-> for syntax only and are not yet verified on a board.
+> **Status.** The Ruby API and the C contract are settled. The `host` port is
+> tested on both VMs. The `esp32` port is verified on hardware (M5Stack Chain
+> DualKey): every argument/return type pattern and every exception matches a
+> CRuby oracle exactly. The `rp2040` port compiles but is not yet verified on
+> a board — a heap-exhaustion bug in the R2P2 harness's own Pico 2 W firmware
+> (unrelated to this gem; the same hang reproduces with no `multicore` code at
+> all) currently blocks running any externally-compiled `.mrb` on that board.
+> Tracked at https://github.com/bash0C7/R2P2-dev-harness/issues/23.
 
 ## Installation
 
@@ -236,8 +241,8 @@ The Ruby layer stays inside the mruby/c subset.
 The host tests run through the PicoRuby harness (picotest) on both VMs, with
 the pthread port and the fake kernels. `test/c/run.sh` builds `test/c/engine_test.c` against the host port
 and runs it under ThreadSanitizer and AddressSanitizer: start / close cycles, the allocation failure
-path and close while a kernel runs, with the host port counting live allocations. Board behavior is
-verified on hardware.
+path and close while a kernel runs, with the host port counting live allocations. `esp32` board behavior
+is verified on hardware (see Status above); `rp2040` is not yet, for reasons unrelated to this gem.
 
 ## License
 
