@@ -10,7 +10,14 @@ the hand-over between the cores and the status codes are hidden; a failure is
 an exception.
 
 The Ruby VM stays on its own core. The kernel runs on the other one and never
-touches the VM.
+touches the VM: there is no second VM instance and no interpreter over there
+at all. A build compiles the kernel ahead of time with
+[spinel](https://github.com/matz/spinel) into plain native code (wrapped into
+a flat C ABI by [suppify](https://github.com/bash0C7/suppify)), and the other
+core just calls that function directly. Writing the kernel in Ruby is for the
+person, not the runtime: an ordinary Ruby method, typed once, checked against
+a CRuby oracle before it ever reaches a board — not a second Ruby VM running
+somewhere you can't see it.
 
 > **Status.** The Ruby API and the C contract are settled. The `host` port is
 > tested on both VMs. The `esp32` port is verified on hardware (M5Stack Chain
