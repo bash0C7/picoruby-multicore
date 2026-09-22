@@ -164,6 +164,12 @@ rp2040 core 1's stack, `MULTICORE_STACK_BYTES` (8192, plus up to 8 bytes of alig
 worker inside a long kernel within the bounded wait it raises `Multicore::Timeout` and everything
 stays allocated until a later `close` (or the next start) finds the worker gone.
 
+On esp32 the start logs (tag `multicore`) the heap headroom before it allocates, at INFO level: the
+largest free block (`heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)`), the free heap and the minimum
+free heap ever, next to the bytes the slots and the task stack need. When the start fails for lack of
+memory it logs one line at error level naming what failed (the job slots, or the task stack) with the
+requested bytes and the same three figures. The host and rp2040 ports log nothing.
+
 `Multicore.in_cap`, `Multicore.out_cap` and `Multicore.queue_depth`
 return the values a build was made with.
 
